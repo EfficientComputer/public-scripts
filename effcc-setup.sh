@@ -216,6 +216,16 @@ Move it aside (mv $VENV $VENV.old) and rerun so a compatible environment is crea
   py="$(find_python)"
   if extras_need_old_python && ! python_ok_for_extras "$py"; then
     # No suitable interpreter on PATH. uv can fetch one and seed the venv with pip.
+    if ! command -v uv >/dev/null 2>&1 && [ -x "$HOME/.local/bin/uv" ]; then
+      PATH="$HOME/.local/bin:$PATH"
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+      if confirm "Python $(py_version "$py") is too new for the ML extras. Install uv (https://astral.sh/uv) to fetch Python 3.13?"; then
+        say "Installing uv into ~/.local/bin"
+        curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh >/dev/null || die "uv install failed"
+        PATH="$HOME/.local/bin:$PATH"
+      fi
+    fi
     if command -v uv >/dev/null 2>&1; then
       say "Python $(py_version "$py") is too new for the ML extras; creating $VENV with a uv-managed Python 3.13"
       if ! uv venv --seed --python 3.13 "$VENV"; then rm -rf "$VENV"; die "uv could not create a Python 3.13 environment"; fi
@@ -350,7 +360,12 @@ install_udev() {
   [ "$DO_UDEV" = 1 ] || return 0
   say "Installing udev rules for the EVK serial ports ($UDEV_RULES_PATH)"
   if ! command -v sudo >/dev/null 2>&1; then warn "sudo not available; skipping udev rules (use eff-flash --port instead)"; return 0; fi
-  printf '%s\n' "$UDEV_RULES" | sudo tee "$UDEV_RULES_PATH" >/dev/null
+  # Releases from 26.3 RC3 on ship the rules file in the install; older ones don't, so keep a copy here.
+  if [ -f "$LINK/etc/99-efficient.rules" ]; then
+    sudo cp "$LINK/etc/99-efficient.rules" "$UDEV_RULES_PATH"
+  else
+    printf '%s\n' "$UDEV_RULES" | sudo tee "$UDEV_RULES_PATH" >/dev/null
+  fi
   sudo udevadm control --reload-rules && sudo udevadm trigger || true
   # Belt and braces: WSL does not always apply MODE from udev, so also join dialout.
   if getent group dialout >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx dialout; then
