@@ -12,7 +12,7 @@
 #                      current directory, then ~/Downloads)
 #   --extras <list>    comma-separated pip extras: litert, onnx, executorch, all.
 #                      Needs the effcc_ml wheel in the same directory as the effcc wheel.
-#   --no-kit           don't install the eff_kit wheel even if one is next to the effcc wheel
+#   --no-kit           don't install the eff_dsp (or eff_kit) wheel even if one is next to the effcc wheel
 #   --venv <dir>       Python virtual environment to use (default: ~/effcc-env)
 #   --python <exe>     Python interpreter used to create the environment
 #   --no-deps          skip installing system packages (cmake, ninja, minicom, ...)
@@ -297,11 +297,12 @@ pip_install() {
   ok "effcc $("$VENV/bin/python" -m pip show effcc 2>/dev/null | awk '/^Version:/{print $2}') installed"
 
   if [ "$INSTALL_KIT" = 1 ]; then
-    kit="$(newest "$dir"/eff_kit-"$(wheel_version "$wheel")"*.whl "$dir"/eff_kit-*.whl)"
+    # The DSP library wheel is eff_dsp; release candidates before the rename shipped it as eff_kit.
+    kit="$(newest "$dir"/eff_dsp-"$(wheel_version "$wheel")"*.whl "$dir"/eff_kit-"$(wheel_version "$wheel")"*.whl "$dir"/eff_dsp-*.whl "$dir"/eff_kit-*.whl)"
     if [ -n "$kit" ]; then
       say "Installing $(basename "$kit")"
       "$VENV/bin/python" -m pip install --upgrade "$kit"
-      ok "eff-kit installed"
+      ok "eff-dsp installed"
     fi
   fi
 }
@@ -325,13 +326,16 @@ link_install() {
   ln -sfn "$effcc_dir" "$LINK"
   ok "$LINK -> $effcc_dir"
 
-  # eff-kit: either folded into the effcc package or installed as its own wheel.
-  if [ ! -e "$LINK/eff_kit" ]; then
-    kit_dir="$(pkg_dir eff_kit)"
+  # eff-dsp: either folded into the effcc package or installed as its own wheel
+  # (package eff_dsp, or eff_kit in release candidates before the rename).
+  local name
+  for name in eff_dsp eff_kit; do
+    [ -e "$LINK/$name" ] && continue
+    kit_dir="$(pkg_dir "$name")"
     if [ -n "$kit_dir" ] && [ -d "$kit_dir" ]; then
-      ln -sfn "$kit_dir" "$effcc_dir/eff_kit" 2>/dev/null && ok "$LINK/eff_kit -> $kit_dir" || warn "could not link eff_kit into $LINK"
+      ln -sfn "$kit_dir" "$effcc_dir/$name" 2>/dev/null && ok "$LINK/$name -> $kit_dir" || warn "could not link $name into $LINK"
     fi
-  fi
+  done
 }
 
 write_shell_profile() {
@@ -452,7 +456,7 @@ do_uninstall() {
       [ -d "$d" ] || continue
       if confirm "Delete $d?"; then rm -rf "$d"; ok "removed $d"; fi
     done
-    for f in "$HOME"/effcc_v*.zip "$HOME"/Downloads/effcc*.whl "$HOME"/Downloads/effcc_v*.zip "$HOME"/Downloads/eff_kit-*.whl; do
+    for f in "$HOME"/effcc_v*.zip "$HOME"/Downloads/effcc*.whl "$HOME"/Downloads/effcc_v*.zip "$HOME"/Downloads/eff_dsp-*.whl "$HOME"/Downloads/eff_kit-*.whl; do
       [ -f "$f" ] || continue
       if confirm "Delete $f?"; then rm -f "$f"; ok "removed $f"; fi
     done

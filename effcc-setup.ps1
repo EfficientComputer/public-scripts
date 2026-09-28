@@ -177,13 +177,14 @@ function Do-Install {
   $version = (& $venvPy -m pip show effcc | Select-String '^Version:').ToString().Split(' ')[1]
   Ok "effcc $version installed"
 
-  # eff-kit ships either inside the effcc package or as its own wheel next to it.
-  $kit = Get-ChildItem -Path (Split-Path $wheel -Parent) -Filter 'eff_kit-*.whl' -ErrorAction SilentlyContinue |
+  # eff-dsp ships either inside the effcc package or as its own wheel next to it.
+  # Package eff_dsp; release candidates before the rename shipped it as eff_kit.
+  $kit = Get-ChildItem -Path (Split-Path $wheel -Parent) -Include 'eff_dsp-*.whl', 'eff_kit-*.whl' -Recurse -Depth 0 -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($kit) {
     Say "Installing $($kit.Name)"
     & $venvPy -m pip install --upgrade $kit.FullName 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { Warn 'eff-kit install failed' } else { Ok 'eff-kit installed' }
+    if ($LASTEXITCODE -ne 0) { Warn 'eff-dsp install failed' } else { Ok 'eff-dsp installed' }
   }
 
   $pkgDir = & $venvPy -c 'import effcc,os;print(os.path.dirname(effcc.__file__))'
@@ -199,10 +200,13 @@ function Do-Install {
   New-Item -ItemType Junction -Path $Link -Target $pkgDir | Out-Null
   Ok "$Link -> $pkgDir"
 
-  $kitPkg = & $venvPy -c "import importlib.util as u;s=u.find_spec('eff_kit');print(s.submodule_search_locations[0] if s and s.submodule_search_locations else '')" 2>$null | Select-Object -First 1
-  if ($kitPkg -and (Test-Path "$kitPkg") -and -not (Test-Path (Join-Path $Link 'eff_kit'))) {
-    New-Item -ItemType Junction -Path (Join-Path $pkgDir 'eff_kit') -Target $kitPkg | Out-Null
-    Ok "$Link\eff_kit -> $kitPkg"
+  foreach ($name in 'eff_dsp', 'eff_kit') {
+    if (Test-Path (Join-Path $Link $name)) { continue }
+    $kitPkg = & $venvPy -c "import importlib.util as u;s=u.find_spec('$name');print(s.submodule_search_locations[0] if s and s.submodule_search_locations else '')" 2>$null | Select-Object -First 1
+    if ($kitPkg -and (Test-Path "$kitPkg")) {
+      New-Item -ItemType Junction -Path (Join-Path $pkgDir $name) -Target $kitPkg | Out-Null
+      Ok "$Link\$name -> $kitPkg"
+    }
   }
 
   if (-not $NoEnv) {
