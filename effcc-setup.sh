@@ -2,6 +2,11 @@
 # effcc-setup.sh - install, update, or uninstall the Efficient Computer effcc SDK
 # on Linux, Windows (WSL), and macOS from the effcc Python wheel.
 #
+# The SDK lives entirely inside a Python virtual environment (default ~/effcc-env).
+# Activate it in each terminal (source ~/effcc-env/bin/activate) and the compiler,
+# eff-flash, and the other tools are on your PATH. Nothing else on the machine is
+# changed, apart from the udev rules on Linux.
+#
 # Usage:
 #   effcc-setup.sh install   [options]   # first-time install
 #   effcc-setup.sh update    [options]   # move an existing install to a new wheel
@@ -12,15 +17,14 @@
 #                      current directory, then ~/Downloads)
 #   --extras <list>    comma-separated pip extras: litert, onnx, executorch, all.
 #                      Needs the effcc_ml wheel in the same directory as the effcc wheel.
-#   --no-kit           don't install the eff_dsp (or eff_kit) wheel even if one is next to the effcc wheel
+#   --no-dsp           don't install the eff_dsp (or eff_kit) wheel even if one is next to the effcc wheel
 #   --venv <dir>       Python virtual environment to use (default: ~/effcc-env)
 #   --python <exe>     Python interpreter used to create the environment
 #   --no-deps          skip installing system packages (cmake, ninja, minicom, ...)
 #   --no-udev          skip installing the udev rules (Linux only)
-#   --no-shell         don't edit your shell profile
 #   --yes              don't ask for confirmation
 #   --purge            (uninstall) also offer to delete older zip installs, downloaded
-#                      effcc zips, and older ML environments found in your home directory
+#                      effcc zips and wheels, and older ML environments in your home directory
 #   -h, --help         show this help
 #
 # Piped form:
@@ -32,26 +36,22 @@ set -euo pipefail
 # Defaults
 # ----------------------------------------------------------------------------
 VENV="${EFFCC_VENV:-$HOME/effcc-env}"
-LINK="$HOME/effcc"
 WHEEL=""
 EXTRAS=""
-INSTALL_KIT=1
+INSTALL_DSP=1
 PYTHON=""
 DO_DEPS=1
 DO_UDEV=1
-DO_SHELL=1
 ASSUME_YES=0
 PURGE=0
 CMD=""
 
 UDEV_RULES_PATH="/etc/udev/rules.d/99-efficient.rules"
+# Copy of the rules for releases that don't ship etc/99-efficient.rules (26.3 RC1 and RC2).
 UDEV_RULES='# Efficient Computer udev rules (installed by effcc-setup.sh)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="38e1", ATTRS{idProduct}=="0001", ENV{ID_USB_INTERFACE_NUM}=="00", SYMLINK+="eff-prog", MODE="0666"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="38e1", ATTRS{idProduct}=="0001", ENV{ID_USB_INTERFACE_NUM}=="02", SYMLINK+="eff-power", MODE="0666"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="38e1", ATTRS{idProduct}=="0001", ENV{ID_USB_INTERFACE_NUM}=="04", SYMLINK+="eff-console", MODE="0666"'
-
-BEGIN_MARK="# >>> effcc SDK >>>"
-END_MARK="# <<< effcc SDK <<<"
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -61,10 +61,9 @@ ok()   { printf '\033[1;32m ok \033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; }
 
 confirm() {
-  # confirm <question>; returns 0 for yes
   if [ "$ASSUME_YES" = 1 ]; then return 0; fi
   local reply
   if [ -t 0 ]; then
@@ -80,16 +79,17 @@ confirm() {
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
-IS_WSL=0
-if [ "$OS" = "Linux" ] && grep -qi microsoft /proc/version 2>/dev/null; then IS_WSL=1; fi
 
 shell_rc() {
-  # The profile file the user's login shell reads.
   case "$(basename "${SHELL:-bash}")" in
     zsh)  echo "$HOME/.zshrc" ;;
     fish) echo "$HOME/.config/fish/config.fish" ;;
     *)    echo "$HOME/.bashrc" ;;
   esac
+}
+
+activate_hint() {
+  if [[ "$(shell_rc)" == *fish* ]]; then echo "source $VENV/bin/activate.fish"; else echo "source $VENV/bin/activate"; fi
 }
 
 # ----------------------------------------------------------------------------
@@ -102,14 +102,13 @@ while [ $# -gt 0 ]; do
     --wheel=*) WHEEL="${1#*=}" ;;
     --extras)  EXTRAS="$2"; shift ;;
     --extras=*) EXTRAS="${1#*=}" ;;
-    --no-kit)  INSTALL_KIT=0 ;;
+    --no-dsp|--no-kit) INSTALL_DSP=0 ;;
     --venv)    VENV="$2"; shift ;;
     --venv=*)  VENV="${1#*=}" ;;
     --python)  PYTHON="$2"; shift ;;
     --python=*) PYTHON="${1#*=}" ;;
     --no-deps) DO_DEPS=0 ;;
     --no-udev) DO_UDEV=0 ;;
-    --no-shell) DO_SHELL=0 ;;
     --yes|-y)  ASSUME_YES=1 ;;
     --purge)   PURGE=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -119,8 +118,8 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$CMD" ] || { usage; exit 1; }
 
-# Run as the user who will use the SDK, not as root: the environment, link, and shell
-# profile all live in $HOME, and the script calls sudo itself for the steps that need it.
+# Run as the user who will use the SDK, not as root: the environment lives in $HOME,
+# and the script calls sudo itself for the steps that need it.
 if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
   die "don't run this script with sudo. Run it as your normal user; it asks for your password when it needs root (system packages, udev rules)."
 fi
@@ -140,9 +139,7 @@ install_deps() {
   [ "$DO_DEPS" = 1 ] || return 0
   say "Installing system dependencies"
   if [ "$OS" = "Darwin" ]; then
-    if ! command -v brew >/dev/null 2>&1; then
-      die "Homebrew is required on macOS. Install it from https://brew.sh and rerun."
-    fi
+    command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS. Install it from https://brew.sh and rerun."
     brew install cmake ninja minicom git python@3.12 >/dev/null || warn "brew install reported a problem; continuing"
   elif command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update -qq
@@ -161,9 +158,7 @@ install_deps() {
 # ----------------------------------------------------------------------------
 py_version() { "$1" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null; }
 py_minor()   { "$1" -c 'import sys;print(sys.version_info[1])' 2>/dev/null; }
-
-# An interpreter is usable only if it can create a venv that has pip
-# (Debian/Ubuntu split ensurepip into python3.X-venv, and deadsnakes builds often lack it).
+# Usable only if it can create a venv that has pip (Debian/Ubuntu split ensurepip into python3.X-venv).
 py_can_venv() { "$1" -c 'import venv, ensurepip' >/dev/null 2>&1; }
 
 find_python() {
@@ -180,7 +175,6 @@ find_python() {
   for v in 3.13 3.12 3.11 3.10; do
     if command -v "python$v" >/dev/null 2>&1 && py_can_venv "python$v"; then echo "python$v"; return; fi
   done
-  # uv-managed interpreters, if uv is installed.
   if command -v uv >/dev/null 2>&1; then
     for v in 3.13 3.12 3.11 3.10; do
       c="$(uv python find "$v" 2>/dev/null || true)"
@@ -192,11 +186,7 @@ find_python() {
   echo python3
 }
 
-extras_need_old_python() {
-  # ML extras need Python 3.10-3.13 because tosa-converter-for-tflite ships no 3.14 wheel.
-  [ -n "$EXTRAS" ]
-}
-
+extras_need_old_python() { [ -n "$EXTRAS" ]; }
 python_ok_for_extras() {
   local minor; minor="$(py_minor "$1")"
   [ -n "$minor" ] && [ "$minor" -ge 10 ] && [ "$minor" -le 13 ]
@@ -216,9 +206,7 @@ Move it aside (mv $VENV $VENV.old) and rerun so a compatible environment is crea
   py="$(find_python)"
   if extras_need_old_python && ! python_ok_for_extras "$py"; then
     # No suitable interpreter on PATH. uv can fetch one and seed the venv with pip.
-    if ! command -v uv >/dev/null 2>&1 && [ -x "$HOME/.local/bin/uv" ]; then
-      PATH="$HOME/.local/bin:$PATH"
-    fi
+    if ! command -v uv >/dev/null 2>&1 && [ -x "$HOME/.local/bin/uv" ]; then PATH="$HOME/.local/bin:$PATH"; fi
     if ! command -v uv >/dev/null 2>&1; then
       if confirm "Python $(py_version "$py") is too new for the ML extras. Install uv (https://astral.sh/uv) to fetch Python 3.13?"; then
         say "Installing uv into ~/.local/bin"
@@ -279,7 +267,7 @@ wheel_version() { basename "$1" | cut -d- -f2; }
 # Install / update
 # ----------------------------------------------------------------------------
 pip_install() {
-  local wheel="$1" dir spec kit ml
+  local wheel="$1" dir spec dsp ml
   dir="$(cd "$(dirname "$wheel")" && pwd)"
   spec="$wheel"
   if [ -n "$EXTRAS" ]; then
@@ -296,12 +284,12 @@ pip_install() {
   "$VENV/bin/python" -m pip install --upgrade --find-links "$dir" "$spec"
   ok "effcc $("$VENV/bin/python" -m pip show effcc 2>/dev/null | awk '/^Version:/{print $2}') installed"
 
-  if [ "$INSTALL_KIT" = 1 ]; then
+  if [ "$INSTALL_DSP" = 1 ]; then
     # The DSP library wheel is eff_dsp; release candidates before the rename shipped it as eff_kit.
-    kit="$(newest "$dir"/eff_dsp-"$(wheel_version "$wheel")"*.whl "$dir"/eff_kit-"$(wheel_version "$wheel")"*.whl "$dir"/eff_dsp-*.whl "$dir"/eff_kit-*.whl)"
-    if [ -n "$kit" ]; then
-      say "Installing $(basename "$kit")"
-      "$VENV/bin/python" -m pip install --upgrade "$kit"
+    dsp="$(newest "$dir"/eff_dsp-"$(wheel_version "$wheel")"*.whl "$dir"/eff_kit-"$(wheel_version "$wheel")"*.whl "$dir"/eff_dsp-*.whl "$dir"/eff_kit-*.whl)"
+    if [ -n "$dsp" ]; then
+      say "Installing $(basename "$dsp")"
+      "$VENV/bin/python" -m pip install --upgrade "$dsp"
       ok "eff-dsp installed"
     fi
   fi
@@ -309,54 +297,30 @@ pip_install() {
 
 pkg_dir() { "$VENV/bin/python" -I -c "import importlib.util,os;s=importlib.util.find_spec('$1');print(os.path.dirname(s.origin) if s and s.origin else (s.submodule_search_locations[0] if s and s.submodule_search_locations else ''))" 2>/dev/null; }
 
-link_install() {
-  local effcc_dir kit_dir stamp
-  effcc_dir="$(pkg_dir effcc)"
-  [ -n "$effcc_dir" ] && [ -x "$effcc_dir/bin/effcc" ] || die "effcc package not found in $VENV after install"
-
-  if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
-    # A real directory here is an older zip-based install.
-    stamp="$LINK.old-$(date +%Y%m%d-%H%M%S)"
-    if confirm "$LINK is an existing (zip-based) install. Move it to $stamp?"; then
-      mv "$LINK" "$stamp"; ok "moved old install to $stamp (delete it when you no longer need it)"
-    else
-      die "refusing to overwrite $LINK. Remove or rename it and rerun."
-    fi
-  fi
-  ln -sfn "$effcc_dir" "$LINK"
-  ok "$LINK -> $effcc_dir"
-
-  # eff-dsp: either folded into the effcc package or installed as its own wheel
-  # (package eff_dsp, or eff_kit in release candidates before the rename).
-  local name
-  for name in eff_dsp eff_kit; do
-    [ -e "$LINK/$name" ] && continue
-    kit_dir="$(pkg_dir "$name")"
-    if [ -n "$kit_dir" ] && [ -d "$kit_dir" ]; then
-      ln -sfn "$kit_dir" "$effcc_dir/$name" 2>/dev/null && ok "$LINK/$name -> $kit_dir" || warn "could not link $name into $LINK"
+# Older guides pointed the build at a zip install through EFFCC_DIR / EFFTOOLS_DIR and a
+# ~/effcc link. Either variable overrides the wheel on PATH, so clear them out.
+clean_legacy() {
+  local rc tmp
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.zprofile" "$HOME/.config/fish/config.fish"; do
+    [ -f "$rc" ] || continue
+    if grep -q -e '>>> effcc SDK >>>' -e 'EFFCC_DIR' -e 'EFFTOOLS_DIR' "$rc"; then
+      tmp="$(mktemp)"
+      awk '
+        $0=="# >>> effcc SDK >>>" {skip=1; next} $0=="# <<< effcc SDK <<<" {skip=0; next}
+        skip {next}
+        /EFFTOOLS_DIR|EFFCC_DIR/ {next}
+        {print}' "$rc" > "$tmp" && cat "$tmp" > "$rc" && rm -f "$tmp"
+      ok "removed EFFCC_DIR/EFFTOOLS_DIR lines from $rc (they would override the wheel)"
     fi
   done
-}
-
-write_shell_profile() {
-  [ "$DO_SHELL" = 1 ] || return 0
-  local rc; rc="$(shell_rc)"
-  say "Updating $rc"
-  mkdir -p "$(dirname "$rc")"; touch "$rc"
-  # Drop the deprecated EFFTOOLS_DIR lines and any block we wrote earlier.
-  local tmp; tmp="$(mktemp)"
-  awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
-    $0==b {skip=1; next} $0==e {skip=0; next}
-    skip {next}
-    /EFFTOOLS_DIR/ {next}
-    {print}' "$rc" > "$tmp" && cat "$tmp" > "$rc" && rm -f "$tmp"
-  if [[ "$rc" == *fish* ]]; then
-    printf '\n%s\nset -gx EFFCC_DIR "%s"\nfish_add_path -g "$EFFCC_DIR/bin"\n%s\n' "$BEGIN_MARK" "$LINK" "$END_MARK" >> "$rc"
-  else
-    printf '\n%s\nexport EFFCC_DIR="%s"\ncase ":$PATH:" in *":$EFFCC_DIR/bin:"*) ;; *) export PATH="$PATH:$EFFCC_DIR/bin" ;; esac\n%s\n' \
-      "$BEGIN_MARK" "$LINK" "$END_MARK" >> "$rc"
+  if [ -L "$HOME/effcc" ]; then
+    rm -f "$HOME/effcc"; ok "removed the ~/effcc link from an earlier setup"
+  elif [ -d "$HOME/effcc" ]; then
+    warn "~/effcc is a zip-based install. It is no longer used; delete it when you're ready (rm -rf ~/effcc)."
   fi
-  ok "EFFCC_DIR and PATH set in $rc (open a new terminal, or: source $rc)"
+  if [ -n "${EFFCC_DIR:-}" ] || [ -n "${EFFTOOLS_DIR:-}" ]; then
+    warn "EFFCC_DIR or EFFTOOLS_DIR is set in this shell and would override the wheel: run  unset EFFCC_DIR EFFTOOLS_DIR"
+  fi
 }
 
 install_udev() {
@@ -364,14 +328,14 @@ install_udev() {
   [ "$DO_UDEV" = 1 ] || return 0
   say "Installing udev rules for the EVK serial ports ($UDEV_RULES_PATH)"
   if ! command -v sudo >/dev/null 2>&1; then warn "sudo not available; skipping udev rules (use eff-flash --port instead)"; return 0; fi
-  # Releases from 26.3 RC3 on ship the rules file in the install; older ones don't, so keep a copy here.
-  if [ -f "$LINK/etc/99-efficient.rules" ]; then
-    sudo cp "$LINK/etc/99-efficient.rules" "$UDEV_RULES_PATH"
+  local pkg; pkg="$(pkg_dir effcc)"
+  if [ -f "$pkg/etc/99-efficient.rules" ]; then
+    sudo cp "$pkg/etc/99-efficient.rules" "$UDEV_RULES_PATH"
   else
     printf '%s\n' "$UDEV_RULES" | sudo tee "$UDEV_RULES_PATH" >/dev/null
   fi
   sudo udevadm control --reload-rules && sudo udevadm trigger || true
-  # Belt and braces: WSL does not always apply MODE from udev, so also join dialout.
+  # WSL does not always apply MODE from udev, so also join dialout.
   if getent group dialout >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx dialout; then
     sudo usermod -a -G dialout "$USER" && ok "added $USER to the dialout group (takes effect at next login)"
   fi
@@ -380,29 +344,33 @@ install_udev() {
 
 verify() {
   say "Verifying"
-  "$LINK/bin/effcc" --version | sed -n 's/^Version: /  effcc /p'
-  "$LINK/bin/eff-flash" --help >/dev/null 2>&1 && echo "  eff-flash $("$LINK/bin/eff-flash" --version 2>/dev/null | awk '/^eff-flash/{print $2}')"
-  if [ "$OS" = "Linux" ] && ! "$LINK/bin/eff-lldb" --version >/dev/null 2>&1; then
-    warn "eff-lldb/eff-prof could not start; on Ubuntu 26.04 they need libxml2.so.2 (see the FAQ in the docs)"
+  "$VENV/bin/effcc" --version | sed -n 's/^Version: /  effcc /p'
+  "$VENV/bin/eff-flash" --help >/dev/null 2>&1 && echo "  eff-flash $("$VENV/bin/eff-flash" --version 2>/dev/null | awk '/^eff-flash/{print $2}')"
+  if [ "$OS" = "Linux" ] && ! "$VENV/bin/eff-lldb" --version >/dev/null 2>&1; then
+    warn "eff-lldb/eff-prof could not start (see the FAQ in the docs)"
   fi
 }
 
 do_install() {
   local wheel; wheel="$(find_wheel)"
-  say "$CMD: $(basename "$wheel") -> $VENV, linked at $LINK"
+  say "$CMD: $(basename "$wheel") -> $VENV"
   install_deps
   ensure_venv
   pip_install "$wheel"
-  link_install
-  write_shell_profile
+  clean_legacy
   install_udev
   verify
   cat <<EOF
 
-Done. Open a new terminal (or run: source $(shell_rc)) and then:
+Done. In every terminal where you build or flash, activate the environment first:
+  $(activate_hint)
+
+Then, for example:
   effcc --version
   git clone https://github.com/EfficientComputer/e1x_examples.git
-  cd e1x_examples/app_examples && cmake -S . -B bld -G Ninja && cmake --build bld --target quickstart/fabric/quickstart
+  cd e1x_examples/app_examples
+  cmake -S . -B bld -G Ninja -DEFF_SDK_ROOT_DIR="\$(python -c 'import effcc; print(effcc.__path__[0])')/sdk"
+  cmake --build bld --target quickstart/fabric/quickstart
   eff-flash bld/quickstart/fabric/quickstart
 EOF
 }
@@ -412,47 +380,24 @@ EOF
 # ----------------------------------------------------------------------------
 do_uninstall() {
   say "Uninstalling the effcc SDK"
-  local rc tmp d f
+  local d f
 
-  # 1. The ~/effcc link (or directory, for zip-based installs).
-  if [ -L "$LINK" ]; then rm -f "$LINK"; ok "removed symlink $LINK"
-  elif [ -d "$LINK" ]; then
-    if confirm "$LINK is a directory (zip-based install). Delete it?"; then rm -rf "$LINK"; ok "removed $LINK"; fi
-  fi
-
-  # 2. The Python environment that holds the wheel.
   if [ -d "$VENV" ]; then
     if confirm "Delete the Python environment $VENV?"; then rm -rf "$VENV"; ok "removed $VENV"; fi
   fi
 
-  # 3. Shell profile lines.
-  if [ "$DO_SHELL" = 1 ]; then
-    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.zprofile" "$HOME/.config/fish/config.fish"; do
-      [ -f "$rc" ] || continue
-      if grep -q -e "$BEGIN_MARK" -e EFFCC_DIR -e EFFTOOLS_DIR "$rc"; then
-        tmp="$(mktemp)"
-        awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
-          $0==b {skip=1; next} $0==e {skip=0; next}
-          skip {next}
-          /EFFTOOLS_DIR|EFFCC_DIR/ {next}
-          {print}' "$rc" > "$tmp" && cat "$tmp" > "$rc" && rm -f "$tmp"
-        ok "removed effcc lines from $rc"
-      fi
-    done
-  fi
+  clean_legacy
 
-  # 4. udev rules.
   if [ "$OS" = "Linux" ] && [ -f "$UDEV_RULES_PATH" ] && [ "$DO_UDEV" = 1 ]; then
     if confirm "Remove the EVK udev rules ($UDEV_RULES_PATH)?"; then
       sudo rm -f "$UDEV_RULES_PATH" && sudo udevadm control --reload-rules && ok "removed udev rules"
     fi
   fi
 
-  # 5. Optional: leftovers from older installs. Only with --purge, and each one is
-  #    confirmed individually even when --yes was given.
+  # Leftovers from older installs: only with --purge, each confirmed even under --yes.
   if [ "$PURGE" = 1 ]; then
     local saved_yes="$ASSUME_YES"; ASSUME_YES=0
-    for d in "$LINK".old-* "$HOME"/effcc_v*/ "$HOME/effcc-litert-env" "$HOME/effcc-onnx-env"; do
+    for d in "$HOME/effcc" "$HOME"/effcc.old-* "$HOME"/effcc_v*/ "$HOME/effcc-litert-env" "$HOME/effcc-onnx-env"; do
       [ -d "$d" ] || continue
       if confirm "Delete $d?"; then rm -rf "$d"; ok "removed $d"; fi
     done
@@ -462,13 +407,13 @@ do_uninstall() {
     done
     ASSUME_YES="$saved_yes"
   else
-    for d in "$LINK".old-* "$HOME"/effcc_v*/ "$HOME/effcc-litert-env" "$HOME/effcc-onnx-env"; do
+    for d in "$HOME/effcc" "$HOME"/effcc.old-* "$HOME"/effcc_v*/ "$HOME/effcc-litert-env" "$HOME/effcc-onnx-env"; do
       [ -d "$d" ] && echo "left in place: $d (rerun with --purge to be asked about it)"
     done
   fi
 
   echo
-  echo "Uninstall complete. Open a new terminal so the removed environment variables take effect."
+  echo "Uninstall complete. Open a new terminal so any removed environment variables take effect."
   echo "Not removed: system packages (cmake, ninja, minicom, ...) and your dialout group membership."
 }
 
