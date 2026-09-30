@@ -9,15 +9,22 @@
 #
 # Usage:
 #   effcc-setup.sh install   [options]   # first-time install
-#   effcc-setup.sh update    [options]   # move an existing install to a new wheel
+#   effcc-setup.sh update    [options]   # move an existing install to the newest release
 #   effcc-setup.sh uninstall [options]   # remove everything this script created
 #
-# Common options:
-#   --wheel <path>     effcc wheel to install (default: newest effcc-*.whl in the
-#                      current directory, then ~/Downloads)
-#   --extras <list>    comma-separated pip extras: litert, onnx, executorch, all.
-#                      Needs the effcc_ml wheel in the same directory as the effcc wheel.
-#   --no-dsp           don't install the eff_dsp (or eff_kit) wheel even if one is next to the effcc wheel
+# Where the SDK comes from (pick one):
+#   --token <token>    install from Efficient's package index with a personal pip token from
+#                      https://downloads.efficient.computer/ (recommended; also read from
+#                      the EFFCC_PIP_TOKEN environment variable; prompted for if neither is given)
+#   --wheel <path>     install from a downloaded effcc wheel instead (offline; put the effcc_ml
+#                      and eff_dsp wheels in the same folder if you need them)
+#
+# Options:
+#   --extras <list>    comma-separated pip extras: litert, onnx, executorch, all
+#   --no-dsp           don't install the eff-dsp library package
+#   --rc               use the release-candidate index (testdownloads.efficient.computer) and
+#                      allow pre-release versions
+#   --version <v>      pin the effcc version to install, for example 26.3.0.0
 #   --venv <dir>       Python virtual environment to use (default: ~/effcc-env)
 #   --python <exe>     Python interpreter used to create the environment
 #   --no-deps          skip installing system packages (cmake, ninja, minicom, ...)
@@ -28,7 +35,7 @@
 #   -h, --help         show this help
 #
 # Piped form:
-#   curl -fsSL <url>/effcc-setup.sh | bash -s -- install --wheel ~/Downloads/effcc-<version>-*.whl
+#   curl -fsSL <url>/effcc-setup.sh | bash -s -- install --token <token> --extras litert
 
 set -euo pipefail
 
@@ -37,6 +44,10 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 VENV="${EFFCC_VENV:-$HOME/effcc-env}"
 WHEEL=""
+TOKEN="${EFFCC_PIP_TOKEN:-}"
+INDEX_HOST="downloads.efficient.computer"
+PRE=""
+PIN=""
 EXTRAS=""
 INSTALL_DSP=1
 PYTHON=""
@@ -61,7 +72,7 @@ ok()   { printf '\033[1;32m ok \033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; }
 
 confirm() {
   if [ "$ASSUME_YES" = 1 ]; then return 0; fi
@@ -100,6 +111,11 @@ while [ $# -gt 0 ]; do
     install|update|uninstall) CMD="$1" ;;
     --wheel)   WHEEL="$2"; shift ;;
     --wheel=*) WHEEL="${1#*=}" ;;
+    --token)   TOKEN="$2"; shift ;;
+    --token=*) TOKEN="${1#*=}" ;;
+    --rc)      INDEX_HOST="testdownloads.efficient.computer"; PRE="--pre" ;;
+    --version) PIN="$2"; shift ;;
+    --version=*) PIN="${1#*=}" ;;
     --extras)  EXTRAS="$2"; shift ;;
     --extras=*) EXTRAS="${1#*=}" ;;
     --no-dsp|--no-kit) INSTALL_DSP=0 ;;
@@ -297,6 +313,47 @@ pip_install() {
   fi
 }
 
+index_url() { echo "https://__token__:${TOKEN}@${INDEX_HOST}/pypi/simple/"; }
+
+# Store the index URL (with the token) in the environment's own pip.conf, so it applies only
+# to this environment and a later `pip install --upgrade effcc` finds the index without the
+# token on the command line.
+configure_index() {
+  "$VENV/bin/python" -m pip config --site set global.extra-index-url "$(index_url)" >/dev/null
+  ok "package index configured in $VENV (pip.conf)"
+}
+
+venv_has_index() { "$VENV/bin/python" -m pip config --site get global.extra-index-url >/dev/null 2>&1; }
+
+ask_token() {
+  local reply=""
+  if [ -e /dev/tty ]; then
+    read -r -s -p "Paste your pip token from https://${INDEX_HOST}/ (input hidden): " reply </dev/tty || true
+    echo
+  fi
+  TOKEN="$reply"
+}
+
+pip_install_index() {
+  local spec="effcc${EXTRAS:+[$EXTRAS]}${PIN:+==$PIN}"
+  say "Installing $spec from https://${INDEX_HOST}/"
+  # shellcheck disable=SC2086
+  if ! "$VENV/bin/python" -m pip install --upgrade $PRE "$spec"; then
+    die "pip could not install effcc from https://${INDEX_HOST}/. Check the token (a wrong or revoked token gives 401 errors) and your network."
+  fi
+  ok "effcc $("$VENV/bin/python" -m pip show effcc 2>/dev/null | awk '/^Version:/{print $2}') installed"
+  if [ "$INSTALL_DSP" = 1 ]; then
+    say "Installing eff-dsp"
+    # shellcheck disable=SC2086
+    if "$VENV/bin/python" -m pip install --upgrade $PRE "eff-dsp${PIN:+==$PIN}"; then
+      "$VENV/bin/python" -m pip uninstall -y eff-kit >/dev/null 2>&1 || true
+      ok "eff-dsp installed"
+    else
+      warn "eff-dsp is not available on the index for this version; skipping"
+    fi
+  fi
+}
+
 pkg_dir() { "$VENV/bin/python" -I -c "import importlib.util,os;s=importlib.util.find_spec('$1');print(os.path.dirname(s.origin) if s and s.origin else (s.submodule_search_locations[0] if s and s.submodule_search_locations else ''))" 2>/dev/null; }
 
 # Older guides pointed the build at a zip install through EFFCC_DIR / EFFTOOLS_DIR and a
@@ -354,15 +411,32 @@ verify() {
 }
 
 do_install() {
-  local wheel; wheel="$(find_wheel)"
-  say "$CMD: $(basename "$wheel") -> $VENV"
+  local wheel=""
+  if [ -n "$WHEEL" ]; then
+    wheel="$(find_wheel)"
+    say "$CMD: $(basename "$wheel") -> $VENV"
+  else
+    # Index install. On update, reuse the index already configured in the environment.
+    if [ -z "$TOKEN" ] && [ "$CMD" = update ] && [ -x "$VENV/bin/python" ] && venv_has_index; then
+      say "$CMD: newest effcc from the index configured in $VENV"
+    else
+      [ -n "$TOKEN" ] || ask_token
+      [ -n "$TOKEN" ] || die "no token given. Pass --token <token> (from https://${INDEX_HOST}/) or --wheel <file>."
+      say "$CMD: effcc from https://${INDEX_HOST}/ -> $VENV"
+    fi
+  fi
   install_deps
   ensure_venv
-  pip_install "$wheel"
+  if [ -n "$wheel" ]; then
+    pip_install "$wheel"
+  else
+    [ -n "$TOKEN" ] && configure_index
+    pip_install_index
+  fi
   clean_legacy
   install_udev
   verify
-  cat <<EOF
+  cat <<DONE
 
 Done. In every terminal where you build or flash, activate the environment first:
   $(activate_hint)
@@ -374,7 +448,7 @@ Then, for example:
   cmake -S . -B bld -G Ninja -DEFF_SDK_ROOT_DIR="\$(python -c 'import effcc; print(effcc.__path__[0])')/sdk"
   cmake --build bld --target quickstart/fabric/quickstart
   eff-flash bld/quickstart/fabric/quickstart
-EOF
+DONE
 }
 
 # ----------------------------------------------------------------------------
