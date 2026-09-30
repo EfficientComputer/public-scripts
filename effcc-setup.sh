@@ -421,6 +421,13 @@ install_udev() {
 # ----------------------------------------------------------------------------
 setup_wsl_usbip() {
   [ "$IS_WSL" = 1 ] || return 0
+  # USB/IP client tools and lsusb, in case install ran without them (or with --no-deps).
+  if ! command -v lsusb >/dev/null 2>&1 || ! ls -d /usr/lib/linux-tools/*/usbip >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      say "Installing the USB/IP client tools (linux-tools-generic hwdata usbutils)"
+      sudo apt-get install -y -qq linux-tools-generic hwdata usbutils
+    fi
+  fi
   # The usbip client binary ships under a kernel-version directory; register the newest one.
   if ! command -v usbip >/dev/null 2>&1; then
     local u; u="$(ls -d /usr/lib/linux-tools/*/usbip 2>/dev/null | sort -V | tail -n1)"
