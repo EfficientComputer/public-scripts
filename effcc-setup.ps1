@@ -184,7 +184,10 @@ function Do-Install {
   if ($dsp) {
     Say "Installing $($dsp.Name)"
     & $venvPy -m pip install --upgrade $dsp.FullName 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { Warn 'eff-dsp install failed' } else { Ok 'eff-dsp installed' }
+    if ($LASTEXITCODE -ne 0) { Warn 'eff-dsp install failed' } else {
+      if ($dsp.Name -like 'eff_dsp-*') { & $venvPy -m pip uninstall -y eff-kit 2>&1 | Out-Null }
+      Ok 'eff-dsp installed'
+    }
   }
 
   Clear-Legacy

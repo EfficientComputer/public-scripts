@@ -290,6 +290,8 @@ pip_install() {
     if [ -n "$dsp" ]; then
       say "Installing $(basename "$dsp")"
       "$VENV/bin/python" -m pip install --upgrade "$dsp"
+      # eff_dsp replaced the RC-era eff_kit distribution; drop the old one if both are present.
+      case "$(basename "$dsp")" in eff_dsp-*) "$VENV/bin/python" -m pip uninstall -y eff-kit >/dev/null 2>&1 || true ;; esac
       ok "eff-dsp installed"
     fi
   fi
