@@ -11,6 +11,7 @@
 #   effcc-setup.sh install   [options]   # first-time install
 #   effcc-setup.sh update    [options]   # move an existing install to the newest release
 #   effcc-setup.sh uninstall [options]   # remove everything this script created
+#   effcc-setup.sh attach-evk            # (WSL) pass the EVK's USB device through to this WSL instance
 #
 # Where the SDK comes from (pick one):
 #   --token <token>    install from Efficient's package index with a personal pip token from
@@ -72,7 +73,7 @@ ok()   { printf '\033[1;32m ok \033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; }
 
 confirm() {
   if [ "$ASSUME_YES" = 1 ]; then return 0; fi
@@ -88,8 +89,14 @@ confirm() {
   [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
+SCRIPT_URL="https://raw.githubusercontent.com/EfficientComputer/public-scripts/main/effcc-setup.sh"
+# How to rerun a subcommand: the file path when run from disk, the curl form when piped.
+rerun_hint() { if [ -f "$0" ]; then echo "$0 $1"; else echo "curl -fsSL $SCRIPT_URL | bash -s -- $1"; fi; }
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
+IS_WSL=0
+if [ "$OS" = "Linux" ] && grep -qi microsoft /proc/version 2>/dev/null; then IS_WSL=1; fi
 
 shell_rc() {
   case "$(basename "${SHELL:-bash}")" in
@@ -108,7 +115,7 @@ activate_hint() {
 # ----------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
-    install|update|uninstall) CMD="$1" ;;
+    install|update|uninstall|attach-evk) CMD="$1" ;;
     --wheel)   WHEEL="$2"; shift ;;
     --wheel=*) WHEEL="${1#*=}" ;;
     --token)   TOKEN="$2"; shift ;;
@@ -161,6 +168,10 @@ install_deps() {
     sudo apt-get update -qq
     sudo apt-get install -y -qq build-essential binutils libcurl4-openssl-dev cmake ninja-build git minicom unzip \
       python3 python3-venv python3-pip
+    if [ "$IS_WSL" = 1 ]; then
+      # USB/IP client tools, so the EVK can be passed through from Windows (usbipd-win).
+      sudo apt-get install -y -qq linux-tools-generic hwdata usbutils
+    fi
   elif command -v dnf >/dev/null 2>&1; then
     sudo dnf install -y gcc glibc-devel binutils libcurl-devel cmake ninja-build git minicom unzip python3 python3-pip
   else
@@ -393,12 +404,80 @@ install_udev() {
   else
     printf '%s\n' "$UDEV_RULES" | sudo tee "$UDEV_RULES_PATH" >/dev/null
   fi
-  sudo udevadm control --reload-rules && sudo udevadm trigger || true
+  if [ -S /run/udev/control ]; then
+    sudo udevadm control --reload-rules 2>/dev/null && sudo udevadm trigger 2>/dev/null || true
+  else
+    warn "udev is not running in this session, so the rule takes effect after a restart (on WSL: run  wsl --shutdown  in PowerShell, then reopen the terminal)."
+  fi
   # WSL does not always apply MODE from udev, so also join dialout.
   if getent group dialout >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx dialout; then
     sudo usermod -a -G dialout "$USER" && ok "added $USER to the dialout group (takes effect at next login)"
   fi
   ok "udev rules installed; unplug and replug the EVK to get /dev/eff-prog, /dev/eff-power, /dev/eff-console"
+}
+
+# ----------------------------------------------------------------------------
+# WSL: USB passthrough of the EVK from Windows (usbipd-win)
+# ----------------------------------------------------------------------------
+setup_wsl_usbip() {
+  [ "$IS_WSL" = 1 ] || return 0
+  # The usbip client binary ships under a kernel-version directory; register the newest one.
+  if ! command -v usbip >/dev/null 2>&1; then
+    local u; u="$(ls -d /usr/lib/linux-tools/*/usbip 2>/dev/null | sort -V | tail -n1)"
+    if [ -n "$u" ]; then
+      sudo update-alternatives --install /usr/local/bin/usbip usbip "$u" 20 >/dev/null 2>&1 && ok "usbip client registered ($u)"
+    else
+      warn "usbip client not found; install it with: sudo apt install linux-tools-generic hwdata usbutils"
+    fi
+  fi
+}
+
+# Find usbipd on the Windows side through WSL interop.
+usbipd_exe() {
+  local c
+  for c in usbipd.exe "/mnt/c/Program Files/usbipd-win/usbipd.exe"; do
+    if command -v "$c" >/dev/null 2>&1 || [ -x "$c" ]; then echo "$c"; return; fi
+  done
+  return 1
+}
+
+attach_evk() {
+  [ "$IS_WSL" = 1 ] || { warn "attach-evk only applies inside WSL"; return 0; }
+  say "Passing the EVK through to WSL"
+  local exe list line busid state
+  if ! exe="$(usbipd_exe)"; then
+    cat <<MSG
+usbipd is not installed on the Windows side. In PowerShell (as Administrator) run:
+  winget install usbipd
+then close and reopen PowerShell and rerun:  $(rerun_hint attach-evk)
+MSG
+    return 0
+  fi
+  list="$("$exe" list 2>/dev/null | tr -d '\r')"
+  line="$(printf '%s\n' "$list" | grep -i '38e1:0001' | head -n1)"
+  if [ -z "$line" ]; then
+    warn "no EVK found on the Windows side. Connect it over USB, power it on, and rerun:  $(rerun_hint attach-evk)"
+    return 0
+  fi
+  busid="$(printf '%s' "$line" | awk '{print $1}')"
+  state="$(printf '%s' "$line" | awk '{print $NF}')"
+  case "$state" in
+    Attached) ok "EVK (bus $busid) is already attached to WSL" ;;
+    Shared)
+      "$exe" attach --wsl --busid "$busid" >/dev/null 2>&1 && ok "EVK (bus $busid) attached to WSL" || warn "attach failed; in PowerShell run:  usbipd attach --wsl --busid $busid" ;;
+    *)
+      # First time only: sharing the device needs administrator rights (one UAC prompt).
+      say "Sharing the EVK (bus $busid) with WSL; approve the Windows administrator prompt"
+      powershell.exe -NoProfile -Command "Start-Process usbipd -ArgumentList 'bind --busid $busid' -Verb RunAs -Wait" >/dev/null 2>&1 || true
+      sleep 2
+      "$exe" attach --wsl --busid "$busid" >/dev/null 2>&1 && ok "EVK (bus $busid) attached to WSL" \
+        || warn "could not attach. In PowerShell (as Administrator) run:  usbipd bind --busid $busid; usbipd attach --wsl --busid $busid" ;;
+  esac
+  sleep 3
+  if ls /dev/eff-prog >/dev/null 2>&1; then ok "/dev/eff-prog, /dev/eff-power, /dev/eff-console are present"
+  elif ls /dev/ttyACM0 >/dev/null 2>&1; then warn "the EVK is visible as /dev/ttyACM* but the udev names are missing; unplug and replug it, or run  sudo udevadm trigger"
+  else warn "the EVK is not visible in WSL yet; check  lsusb  after a few seconds, or rerun:  $(rerun_hint attach-evk)"; fi
+  echo "Note: after a power cycle or reconnect, rerun  $(rerun_hint attach-evk)  if the EVK disappears from WSL."
 }
 
 verify() {
@@ -435,7 +514,9 @@ do_install() {
   fi
   clean_legacy
   install_udev
+  setup_wsl_usbip
   verify
+  if [ "$IS_WSL" = 1 ]; then attach_evk; fi
   cat <<DONE
 
 Done. In every terminal where you build or flash, activate the environment first:
@@ -496,4 +577,5 @@ do_uninstall() {
 case "$CMD" in
   install|update) do_install ;;
   uninstall) do_uninstall ;;
+  attach-evk) setup_wsl_usbip; attach_evk ;;
 esac
