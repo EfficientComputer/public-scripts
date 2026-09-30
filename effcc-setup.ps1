@@ -81,9 +81,9 @@ function Install-Deps {
   }
   Say 'Installing system dependencies with winget (Git, CMake, Ninja)'
   foreach ($id in 'Git.Git', 'Kitware.CMake', 'Ninja-build.Ninja') {
-    if (-not (Test-Cmd 'winget' @('install', '--id', $id, '-e', '--accept-source-agreements', '--accept-package-agreements', '--silent'))) {
-      Warn "winget could not install $id (already installed, or install it by hand)"
-    }
+    if (Test-Cmd 'winget' @('list', '--id', $id, '-e', '--accept-source-agreements')) { Ok "$id already installed"; continue }
+    if (Test-Cmd 'winget' @('install', '--id', $id, '-e', '--accept-source-agreements', '--accept-package-agreements', '--silent')) { Ok "$id installed" }
+    else { Warn "winget could not install $id; install it by hand" }
   }
   Ok 'system dependencies'
 }
@@ -131,6 +131,8 @@ function Ensure-Venv {
     Invoke-Py $py @('-m', 'venv', $Venv) 2>&1 | ForEach-Object { "$_" }
     if (-not (Test-Path $venvPy)) { Die "could not create $Venv" }
   }
+  # A current pip avoids "new release of pip is available" noise and old resolver quirks.
+  & $venvPy -m pip install --quiet --upgrade pip 2>&1 | Out-Null
   return $venvPy
 }
 

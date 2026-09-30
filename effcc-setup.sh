@@ -256,6 +256,8 @@ Install uv (curl -LsSf https://astral.sh/uv/install.sh | sh) and rerun, or pass 
     rm -rf "$VENV"
     die "could not create a virtual environment with $py (on Debian/Ubuntu: sudo apt install python3-venv)"
   fi
+  # A current pip avoids "new release of pip is available" noise and old resolver quirks.
+  "$VENV/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
 }
 
 # ----------------------------------------------------------------------------
