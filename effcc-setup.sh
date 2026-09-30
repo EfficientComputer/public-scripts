@@ -166,14 +166,16 @@ install_deps() {
     brew install cmake ninja minicom git python@3.12 >/dev/null || warn "brew install reported a problem; continuing"
   elif command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update -qq
+    # libsm6/libice6: OpenCV's window plugin needs them for the SDK's host-side viewers
+    # (for example the HM0360 camera example); default WSL images lack them.
     sudo apt-get install -y -qq build-essential binutils libcurl4-openssl-dev cmake ninja-build git minicom unzip \
-      python3 python3-venv python3-pip
+      python3 python3-venv python3-pip libsm6 libice6
     if [ "$IS_WSL" = 1 ]; then
       # USB/IP client tools, so the EVK can be passed through from Windows (usbipd-win).
       sudo apt-get install -y -qq linux-tools-generic hwdata usbutils
     fi
   elif command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y gcc glibc-devel binutils libcurl-devel cmake ninja-build git minicom unzip python3 python3-pip
+    sudo dnf install -y gcc glibc-devel binutils libcurl-devel cmake ninja-build git minicom unzip python3 python3-pip libSM libICE
   else
     warn "unknown package manager; make sure cmake, ninja, git, minicom, and python3 (with venv) are installed"
   fi
