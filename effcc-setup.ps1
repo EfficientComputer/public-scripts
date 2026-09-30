@@ -262,8 +262,7 @@ function Do-Install {
   Write-Host '  effcc --version'
   Write-Host '  git clone https://github.com/EfficientComputer/e1x_examples.git'
   Write-Host '  cd e1x_examples\app_examples'
-  Write-Host '  $pkg = python -c ''import effcc; print(effcc.__path__[0])''; cmake -S . -B bld -G Ninja -DEFF_SDK_ROOT_DIR="$pkg/sdk" -DEFFCC_DIR="$pkg"'
-  Write-Host '  cmake --build bld --target quickstart'
+  Write-Host '  cmake -S . -B bld -G Ninja; cmake --build bld --target quickstart'
   Write-Host '  eff-flash bld\quickstart\fabric\quickstart'
 }
 

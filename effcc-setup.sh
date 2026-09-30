@@ -535,8 +535,7 @@ Then, for example:
   effcc --version
   cd ~ && git clone https://github.com/EfficientComputer/e1x_examples.git
   cd e1x_examples/app_examples
-  cmake -S . -B bld -G Ninja -DEFF_SDK_ROOT_DIR="\$(python -c 'import effcc; print(effcc.__path__[0])')/sdk"
-  cmake --build bld --target quickstart/fabric/quickstart
+  cmake -S . -B bld -G Ninja && cmake --build bld --target quickstart/fabric/quickstart
   eff-flash bld/quickstart/fabric/quickstart
 DONE
 }
