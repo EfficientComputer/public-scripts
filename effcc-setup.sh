@@ -535,8 +535,8 @@ Done. In every terminal where you build or flash, activate the environment first
 
 Then, for example:
   effcc --version
-  cd ~ && git clone https://github.com/EfficientComputer/e1x_examples.git
-  cd e1x_examples/app_examples
+  cd ~ && git clone https://github.com/EfficientComputer/electron-examples.git
+  cd electron-examples/app_examples
   cmake -S . -B bld -G Ninja && cmake --build bld --target quickstart/fabric/quickstart
   eff-flash bld/quickstart/fabric/quickstart
 DONE

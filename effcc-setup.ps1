@@ -260,8 +260,8 @@ function Do-Install {
   Write-Host ''
   Write-Host 'Then, for example:'
   Write-Host '  effcc --version'
-  Write-Host '  git clone https://github.com/EfficientComputer/e1x_examples.git'
-  Write-Host '  cd e1x_examples\app_examples'
+  Write-Host '  git clone https://github.com/EfficientComputer/electron-examples.git'
+  Write-Host '  cd electron-examples\app_examples'
   Write-Host '  cmake -S . -B bld -G Ninja; cmake --build bld --target quickstart'
   Write-Host '  eff-flash bld\quickstart\fabric\quickstart'
 }
