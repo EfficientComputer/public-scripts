@@ -458,9 +458,10 @@ attach_evk() {
   local exe list line busid state
   if ! exe="$(usbipd_exe)"; then
     cat <<MSG
-usbipd is not installed on the Windows side. In PowerShell (as Administrator) run:
+usbipd was not found on the Windows side. If you have not installed it, in PowerShell (as Administrator) run:
   winget install usbipd
-then close and reopen PowerShell and rerun:  $(rerun_hint attach-evk)
+If you just installed it, WSL still has the old PATH: in PowerShell run  wsl --shutdown , reopen this
+Ubuntu terminal, and rerun:  $(rerun_hint attach-evk)
 MSG
     return 0
   fi
@@ -479,7 +480,8 @@ MSG
     *)
       # First time only: sharing the device needs administrator rights (one UAC prompt).
       say "Sharing the EVK (bus $busid) with WSL; approve the Windows administrator prompt"
-      powershell.exe -NoProfile -Command "Start-Process usbipd -ArgumentList 'bind --busid $busid' -Verb RunAs -Wait" >/dev/null 2>&1 || true
+      local win_exe; win_exe="$(wslpath -w "$(command -v "$exe" 2>/dev/null || echo "$exe")" 2>/dev/null || echo usbipd)"
+      powershell.exe -NoProfile -Command "Start-Process -FilePath '$win_exe' -ArgumentList 'bind --busid $busid' -Verb RunAs -Wait" >/dev/null 2>&1 || true
       sleep 2
       "$exe" attach --wsl --busid "$busid" >/dev/null 2>&1 && ok "EVK (bus $busid) attached to WSL" \
         || warn "could not attach. In PowerShell (as Administrator) run:  usbipd bind --busid $busid; usbipd attach --wsl --busid $busid" ;;
